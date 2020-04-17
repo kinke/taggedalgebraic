@@ -11,11 +11,17 @@ module taggedalgebraic.taggedunion;
 static import taggedalgebraic.visit;
 alias visit = taggedalgebraic.visit.visit;
 
-import std.algorithm.mutation : move, swap;
+import std.algorithm.mutation : move, moveEmplace, swap;
 import std.meta;
 import std.range : isOutputRange;
 import std.traits : EnumMembers, FieldNameTuple, Unqual, isInstanceOf;
 
+
+template HelperType(T)
+{
+	static if (isUnitType!T) alias HelperType = Void;
+	else alias HelperType = T;
+}
 
 /** Implements a generic tagged union type.
 
@@ -35,7 +41,7 @@ import std.traits : EnumMembers, FieldNameTuple, Unqual, isInstanceOf;
 	)
 */
 template TaggedUnion(U) if (is(U == union) || is(U == struct) || is(U == enum)) {
-align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
+struct TaggedUnion
 {
 	import std.traits : FieldTypeTuple, FieldNameTuple, Largest,
 		hasElaborateCopyConstructor, hasElaborateDestructor, isCopyable;
@@ -55,17 +61,17 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 
 	package alias FieldTypeByName(string name) = FieldTypes[__traits(getMember, Kind, name)];
 
+	private static union Data {
+		static if (!isUnitType!(FieldTypes[0]))
+			FieldTypes[0] initField;
+		staticMap!(HelperType, FieldTypes) field;
+	}
+
 	private {
-		static if (isUnitType!(FieldTypes[0]) || __VERSION__ < 2072) {
-			void[Largest!FieldTypes.sizeof] m_data;
-		} else {
-			union Dummy {
-				FieldTypes[0] initField;
-				void[Largest!FieldTypes.sizeof] data;
-				alias data this;
-			}
-			Dummy m_data = { initField: FieldTypes[0].init };
-		}
+		static if (!isUnitType!(FieldTypes[0]))
+			Data m_data = { initField: FieldTypes[0].init };
+		else
+			Data m_data = void;
 		Kind m_kind;
 	}
 
@@ -117,7 +123,7 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 					static if (hasElaborateCopyConstructor!T)
 					{
 						case __traits(getMember, Kind, tname):
-							typeid(T).postblit(cast(void*)&trustedGet!T());
+							typeid(T).postblit(cast(void*)&trustedGet!i());
 							return;
 					}
 				}
@@ -134,7 +140,7 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 					alias T = FieldTypes[i];
 					case __traits(getMember, Kind, tname):
 						static if (hasElaborateDestructor!T) {
-							.destroy(trustedGet!T);
+							.destroy(trustedGet!i);
 						}
 						return;
 				}
@@ -150,10 +156,10 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 		final switch (m_kind) {
 			foreach (i, FT; FieldTypes) {
 				case __traits(getMember, Kind, fieldNames[i]):
-					static if (is(typeof(trustedGet!FT) : T))
-						return trustedGet!FT;
-					else static if (is(typeof(to!T(trustedGet!FT)))) {
-						return to!T(trustedGet!FT);
+					static if (is(typeof(trustedGet!i) : T))
+						return trustedGet!i;
+					else static if (is(typeof(to!T(trustedGet!i)))) {
+						return to!T(trustedGet!i);
 					} else {
 						assert(false, "Cannot cast a " ~ fieldNames[i]
 								~ " value of type " ~ FT.stringof ~ " to " ~ T.stringof);
@@ -171,10 +177,10 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 		final switch (m_kind) {
 			foreach (i, FT; FieldTypes) {
 				case __traits(getMember, Kind, fieldNames[i]):
-					static if (is(typeof(trustedGet!FT) : T))
-						return trustedGet!FT;
-					else static if (is(typeof(to!T(trustedGet!FT)))) {
-						return to!T(trustedGet!FT);
+					static if (is(typeof(trustedGet!i) : T))
+						return trustedGet!i;
+					else static if (is(typeof(to!T(trustedGet!i)))) {
+						return to!T(trustedGet!i);
 					} else {
 						assert(false, "Cannot cast a " ~ fieldNames[i]
 								~ " value of type" ~ FT.stringof ~ " to " ~ T.stringof);
@@ -192,7 +198,7 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 		final switch (this.kind) {
 			foreach (i, fname; TaggedUnion!U.fieldNames)
 				case __traits(getMember, Kind, fname):
-					return trustedGet!(FieldTypes[i]) == other.trustedGet!(FieldTypes[i]);
+					return trustedGet!i == other.trustedGet!i;
 		}
 		assert(false); // never reached
 	}
@@ -261,7 +267,7 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 			}
 		}
 		//return trustedGet!(FieldTypes[kind]);
-		return *() @trusted { return cast(const(FieldTypes[kind])*)m_data.ptr; } ();
+		return m_data.fields[kind];
 	}
 
 
@@ -280,7 +286,7 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 			static foreach (i, n; fieldNames) {
 				case __traits(getMember, Kind, n):
 					static if (is(FieldTypes[i] == T))
-						return trustedGet!T;
+						return trustedGet!i;
 					else assert(false, "Attempting to get type "~T.stringof
 						~ " from a TaggedUnion with type "
 						~ FieldTypes[__traits(getMember, Kind, n)].stringof);
@@ -295,13 +301,13 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 	{
 		if (m_kind != kind) {
 			destroy(this);
-			m_data.rawEmplace(value);
+			m_data.field[kind].moveEmplace(value);
 		} else {
-			rawSwap(trustedGet!(FieldTypes[kind]), value);
+			rawSwap(trustedGet!kind, value);
 		}
 		m_kind = kind;
 
-		return trustedGet!(FieldTypes[kind]);
+		return trustedGet!kind;
 	}
 
 	/** Sets a `void` value of the specified kind.
@@ -355,7 +361,7 @@ align(commonAlignment!(UnionKindTypes!(UnionFieldEnum!U))) struct TaggedUnion
 	}
 
 
-	package @trusted @property ref inout(T) trustedGet(T)() inout { return *cast(inout(T)*)m_data.ptr; }
+	package @trusted @property ref trustedGet(size_t i)() inout { return m_data.field[i]; }
 }
 }
 
@@ -705,18 +711,6 @@ unittest {
 		assert(commonAlignment!(S1, S3) == 8);
 		assert(commonAlignment!(S1, S2, S3) == 8);
 		assert(commonAlignment!(S2, S2, S1) == 4);
-	}
-}
-
-package void rawEmplace(T)(void[] dst, ref T src)
-{
-	T[] tdst = () @trusted { return cast(T[])dst[0 .. T.sizeof]; } ();
-	static if (is(T == class)) {
-		tdst[0] = src;
-	} else {
-		import std.conv : emplace;
-		emplace!T(&tdst[0]);
-		rawSwap(tdst[0], src);
 	}
 }
 
